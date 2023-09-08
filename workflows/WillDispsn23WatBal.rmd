@@ -1,0 +1,213 @@
+---
+output:
+  word_document: default
+  html_document: default
+---
+-----
+title: "CE-QUAL-W2 temperature modeling of Willamette Reservoirs"
+author: Norman Buccola
+output: html_document
+----
+
+```{r global_options, include=FALSE,results="hide"} 
+# Norman Buccola, USACE, 2023-07-26
+# the First time you run this script you may need to install the following packages
+#install.packages('devtools')
+#devtools::install_github("nbuccola/w2r") 
+
+#install.packages(c('reshape2','foreach','lubridate','ggplot2','plyr','RColorBrewer','scales','hydroTSM'))
+rm(list=ls())
+library(knitr)
+knitr::opts_chunk$set(fig.width=8, fig.height=4, fig.path='Figs/',                      #root.dir='/media/removable/Elements/ColumbiaEIS/',
+                      #root.dir='F:/ColumbiaEIS/',
+                      include=T,echo=F, warning=FALSE,message=FALSE)
+library(foreach)
+library(xts); 
+library(gdata); library(reshape2); 
+library(ggplot2)
+library(scales)
+library(RColorBrewer)
+library(tidyr)
+library(lubridate)
+library(dplyr)
+library(readr)
+library(w2r)
+#ls("package:w2r")
+
+c2f<-function(x) {(x*(9/5))+32}
+f2c<-function(x) {(x-32)*(5/9)}
+
+# Set working directory
+wd<-"C:/Users/g2echnb9/Documents/WillametteDisposition2023"
+DataDir <- file.path(wd,'RES-SIM')
+projFldr<-'DcmPnstck'
+# Where to get RES-SIM data
+RefDataDir<-file.path(wd,'RefData') # 
+#funcDir <- 'C:/Users/g2echnb9/Documents/R/w2r/R'
+verDir<-''
+scenarios<-data.frame(Baseline = NA,DcmPnstck = NA,RcnPnstck = NA,StationService = NA)
+
+years<-c('2011','2015','2016')
+# Read in RES-SIM to W2 codes
+RessimCodes<-read.csv(file.path(DataDir,'WillW2OutputNmsSeg.csv'),stringsAsFactors = F)
+# Load outlets at each dam
+source(file.path(DataDir,'QGT_elvsFrom_w2_con_2021-11-01.r'))
+
+# Load the Rule Curves
+source(file.path(DataDir,'WVWQfunctions_2023-07-19.r'))
+
+RuleCurveDir <- file.path(RefDataDir,'rule_curves')
+rcs <- ReadRuleCurves(RuleCurveDir) %>% 
+   expand_grid(tibble(Year = c('2011','2015', '2016')))  %>%
+   expand_grid(tibble(Alt = names(scenarios))) %>%
+   mutate(Year = as.factor(Year)) #,
+          # Site = as.factor(Site,levels =  names(qgtConfig$CenterElvs),ordered=T)) 
+rcs$Site <- as.factor(rcs$Site)
+
+elvVolCurvPath <- file.path(RefDataDir,'elv_vol_curves')
+
+
+```
+
+Water Balance steps:
+1) Run the W2 models a first time with QDT set to OFF. 
+2) Run the following code chunk to calculate the missing flow needed (QDT) to meet the operational lake levels and close the water balance for each reservoir. Use the WillW2_HCR-LOP_IRRM_2020_watbalSwitch.csv file to control which reservoir, year, and scenario needs a new QDT (re-)written. 
+3) Re-Run W2 model with QDT set to ON and repeat step 2. 
+4) Repeat steps 2 and 3 as needed. In the MF Willamette, only one iteration was needed.
+
+
+```{r RunWaterBalance, echo=F,include =F,results="hide"}
+rm(wbFits)
+firstRun<-F # True will change QDT to "OFF" in the control file
+watbalSwitches<-read.csv(file.path(wd,'WillW2_HydDisp_watbalSwitch.csv'),stringsAsFactors = F,header=T)
+watbalSwitches <- watbalSwitches[colSums(!is.na(watbalSwitches)) > 0] %>% drop_na()
+watbalSwitchesBig <- merge(watbalSwitches,RessimCodes,by = 'RESSIMCode',all = T)
+wbFits<-as.list(rep(NA,ncol(watbalSwitches)-2)) 
+names(wbFits)<-colnames(watbalSwitches)[-c(1,ncol(watbalSwitches))]
+
+for(sc in 1:length(wbFits)){# Loop through scenarios
+  #sc=1
+  scName <- names(wbFits)[sc]
+  print(scName)
+  scModWhich<-which(!is.na(watbalSwitchesBig[,sc+1]))
+  if(!any(scModWhich)){next} # No models run for this scenario
+  resSc <- watbalSwitchesBig[scModWhich,'W2name']
+  w2Path<-file.path(wd,scName,resSc)
+  w2Dirs<-list.dirs(w2Path,recursive=F)
+  w2DirsShrt<-list.dirs(w2Path,recursive=F,full.names = F)
+  watbalSc <- watbalSwitchesBig[scModWhich,]
+  scDirs <- w2DirsShrt[grep(unique(watbalSc$Year),w2DirsShrt)]
+  scMod <- sort(unlist(sapply(unique(watbalSc$W2name),grep,scDirs)))
+  scModYrs <- unique(watbalSc$Year)
+  #scMods <- sort(unlist(sapply(paste0(watbalSc$W2name,watbalSc$Year),grep,w2DirsShrt)))
+  scMods <- grep(scModYrs,w2DirsShrt)
+  wbSite<-unique(watbalSc$RESSIMCode)
+  scModsDf<-foreach(yr= scModYrs,.combine='rbind') %do% {
+    foreach(site= 1:length(wbSite),.combine='rbind') %do% {
+      SitePth <- which(grepl(yr,w2DirsShrt) & 
+                         grepl(watbalSc$W2name[site],w2DirsShrt))
+      if(length(SitePth)>1){SitePth <- SitePth[watbalSc$wb[site]]}
+      yrdf <- data.frame(RESSIMCode=wbSite[site],
+                         Path = w2Dirs[SitePth],
+                         Dir=w2DirsShrt[SitePth],
+                       stringsAsFactors = F)
+      rcdm <- which(RessimCodes$RESSIMCode %in% yrdf$RESSIMCode)
+      #mm$RESSIMCode <- 
+      yrdf$SegmentOutput<-RessimCodes$SegmentOutput[rcdm]
+      yrdf$wb<-RessimCodes$wb[rcdm]
+      return(yrdf)  
+    }
+  }
+  scModsDfsc<-scModsDf
+  scModsDfsc$Scenario<-names(wbFits)[sc]
+  wbFits[[sc]]<-as.list(w2DirsShrt[scMods]) #rep(NA,length(scMods)))
+  names(wbFits[[sc]])<-w2DirsShrt[scMods]
+  opt2keep<-c('pre.opt','*.exe',paste0("_seg",unique(scModsDf$SegmentOutput),'.opt'), #'wl.opt',
+            paste0("qwo_",unique(scModsDf$SegmentOutput),'.opt'))
+  
+  for(i in 1:length(scMods)){
+    #i=1
+    print(scModsDf[i,])
+    mod<-scModsDf$RESSIMCode[i]
+    wtbli<-grepl(mod,watbalSc$RESSIMCode) & 
+      grepl(as.numeric(gsub("\\D","",scModsDf$Dir[i])),
+            watbalSc$Year)
+    
+    # source(file.path(funcDir,'errs.r'))
+    # source(file.path(funcDir,'apply.davg.oncols.r'))
+    # source(file.path(funcDir,'modifyInitWSELVbth.r'))
+    # source(file.path(funcDir,'modifyW2con.r'))
+    # source(file.path(funcDir,'moving.avg.r'))
+    if(firstRun & watbalSc[wtbli,sc+1]){
+      # Change QDT to "OFF"
+      qdt<-'OFF'
+    }else{
+      qdt<-'ON'
+    }
+    modifyW2con(path=scModsDf$Path[i],
+                seg=scModsDf$SegmentOutput[i],
+                qdt=qdt,
+                wb=scModsDf$wb[i]
+                )
+  
+    # source(file.path(funcDir,'readW2ConInOut.r'))
+    # source(file.path(funcDir,'waterBalanceGeneric.r'))
+    elvcrvs <- list.files(elvVolCurvPath)
+    elvcrv <- elvcrvs[grepl(scModsDf$RESSIMCode[i],elvcrvs)]
+
+    wbFits[[sc]][[i]]<-readW2ConInOut(
+      path=scModsDf$Path[i],
+      write.files=watbalSc[wtbli,sc+1],
+      seg=scModsDf$SegmentOutput[i],
+      wb=scModsDf$wb[i],
+      elvVolCrvFl = file.path(elvVolCurvPath,elvcrv),
+      RESSIMCode=RessimCodes$ReachName[grep(scModsDf$RESSIMCode[i],RessimCodes$RESSIMCode)],
+      wd=wd)
+    
+    # if(watbalSc[wtbli,sc+1]){
+    #   # Remove old model output
+    #   optfls<-list.files(file.path(w2Path,scModsDf$Dir[i]),pattern='.opt',full.names = T)
+    #   opt2keepi<-opt2keep[!grepl(scModsDf$SegmentOutput[i],opt2keep)]
+    #   optfls<-optfls[!grepl(paste(opt2keepi,collapse = '|'),optfls)]
+    #   for(fl in 1:length(optfls)){
+    #       print(paste('Deleting', optfls[fl]))
+    #       file.remove(optfls[fl])
+    #   }
+    # }
+
+    wbFitSc<-data.frame(Scenario=names(scenarios)[sc],
+                        Year=watbalSc$Year[wtbli],
+                        RESSIMCode=scModsDf$RESSIMCode[i],
+                        wbFits[[sc]][[i]]$watbal$fit)
+    
+    if(exists('wbFitsAll')){
+      wbFitsAll<-rbind(wbFitsAll,wbFitSc)
+    }else{
+      wbFitsAll<-wbFitSc
+    }
+
+  }# End Scenario loop
+
+}
+
+
+wbFitsAll$Year<-as.factor(wbFitsAll$Year)
+wbFitsAll$RESSIMCode<-as.factor(wbFitsAll$RESSIMCode)
+wbFitsAll$Scenario<-as.factor(wbFitsAll$Scenario)
+plt<-ggplot(wbFitsAll[,-match(c('N','ME'),colnames(wbFitsAll))],
+       aes(x=RESSIMCode,y=MAE,colour=Year)) +
+  geom_point() +
+  ggtitle('Water Balance') +
+  facet_free(Scenario ~Year,scales = 'fixed')
+plt
+
+ggsave(plt,width = 9,height = 6,
+       filename = file.path(wd,projFldr,verDir,'WaterBalanceSummary.png'),
+       device = 'png')
+#save(scModsDf,wbFits,w2io,
+#     file=file.path(wd,projFldr,verDir,'MFWill_IRRM_WaterBalanceResults.rdata'))
+    
+```
+
+
+
