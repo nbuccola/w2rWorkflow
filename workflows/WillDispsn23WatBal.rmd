@@ -25,9 +25,15 @@ knitr::opts_chunk$set(
 
 library(dplyr)
 library(tidyr)
+library(ggplot2)
 library(readr)
 library(purrr)
 library(w2r)
+library(furrr)
+library(processx)
+library(future.callr)
+plan(callr)
+
 
 c2f = function(x) {
   (x * 9 / 5) + 32
@@ -41,8 +47,7 @@ wd = "C:/projects/WillametteDisposition2023/WQ"
 DataDir = file.path(wd, "RES-SIM")
 projFldr = "DcmPnstck"
 # Where to get RES-SIM data
-RefDataDir = file.path(wd,RefData)
-#funcDir <- 'C:/Users/g2echnb9/Documents/R/w2r/R'
+RefDataDir = file.path(wd, "RefData")
 verDir = ""
 scenarios = data.frame(Baseline = NA, DcmPnstck = NA, RcnPnstck = NA, StationService = NA)
 
@@ -72,57 +77,173 @@ Water Balance steps:
 
 
 ```{r RunWaterBalance, echo = FALSE, include = FALSE, results = "hide"}
-rm(wbFits)
-# True will change QDT to "OFF" in the control file
-firstRun = FALSE
-
-
 wbFits = read_csv(file.path(wd, "WillW2_HydDisp_watbalSwitch.csv")) |>
   mutate(Year = factor(round(Year))) |>
   # turn wide table into long table
   pivot_longer(!all_of(c("RESSIMCode", "Year")),
     names_to = "Scenario", values_to = "Flag") |>
-  # drop rows that we are not investigating
-  filter(!is.na(Flag)) |>
   # attach WQ model codes
   left_join(RessimCodes, by = "RESSIMCode") |>
   mutate(
+    W2name = factor(W2name, c("hcr", "mfwill", "lopdex", "cgr", "gpfos", "det", "bcl")),
     # get working directory for each model run
     path = file.path(wd, Scenario, W2name, paste0(W2name, Year)),
     pathExists = file.exists(path),
     # identify qdt value for every run
-    qdt = if_else(firstRun & Flag, "OFF", "ON"),
+    qdt = if_else(Flag, "ON", "OFF"),
     # get path to elevation-volume curve for every run
     # should error if you get more than 1 curve per model
     elvVolCrvFl = map_chr(RESSIMCode, function(x)
-      dir(elvVolCurvPath, full.names = TRUE,
-        pattern = sprintf("%s_elev_curve_fromPreProcessor.csv", x))
+      c(list.files(elvVolCurvPath, full.names = TRUE,
+        pattern = sprintf("^%s_elev_curve_.*\\.csv$", x)),
+        NA_character_)[1]
     )
   )
 
-# walk trough model 
-wbFits |>
-  select(path, qdt, seg = SegmentOutput, wb) |>
-  pwalk(modifyW2con)
+# walk through model
+wbMod = wbFits |>
+  # drop rows that we are not investigating
+  filter(!is.na(Flag)) |>
+  mutate(Modified = pmap(
+    list(path = path, qdt = qdt, seg = SegmentOutput, wb = wb, Flag = Flag),
+    function(..., Flag) {
+      if (Flag) {
+        modifyW2con(...)
+        TRUE
+      } else {
+        FALSE
+      }
+    }
+  ))
+```
 
-wbSummary = wbFits |>
+
+```{r}
+# always run check first
+wbSummary = wbMod |>
+  filter(
+    !(W2name %in% c("bcl", "mfwill")),
+    Scenario == "DcmPenstock"
+  ) |>
   mutate(Result = pmap(
-    list(path = path, seg = SegmentOutput, wb = wb, write.files = Flag,
-      elvVolCrvFl =elvVolCrvFl, RESSIMCode = ReachName),
+    list(path = path, seg = SegmentOutput, wb = wb, write.files = FALSE,
+      elvVolCrvFl = elvVolCrvFl, RESSIMCode = ReachName),
     function(...)
       readW2ConInOut(..., wd = wd)$watbal$fit
   )) |>
   hoist(Result, "N", "ME", "MAE")
 
 
-plt = ggplot(wbSummary) +
-  aes(x = RESSIMCode, y = MAE) +
-  geom_point(size = 5, shape = 21, fill = "lightblue") +
+ggplot(wbSummary) +
+  aes(x = Year, y = MAE, fill = Flag) +
+  geom_hline(yintercept= 0.2, color = "red") +
+  geom_point(size = 5, shape = 21) +
   ggtitle('Water Balance') +
-  facet_grid(c("Year", "Scenario")) +
+  facet_grid(c("W2name", "Scenario")) +
   scale_x_discrete(NULL) +
-  theme_bw(18)
+  scale_y_log10() +
+  scale_fill_manual("Modification Allowed", values = c("TRUE" = "lightblue", "FALSE" = "grey70")) +
+  theme_bw(18) +
+  theme(legend.position = "bottom")
 
-ggsave(plt, file.path(wd, projFldr, verDir, "WaterBalanceSummary.png"),
-  width = 9,height = 6)
+#ggsave(plt, file.path(wd, projFldr, verDir, "WaterBalanceSummary.png"),
+#  width = 9,height = 6)
+
+
+# run headwaters first
+wbSelect = wbSummary |>
+  filter(
+    Flag
+  ) |>
+  select(RESSIMCode, Scenario, Year)
+```
+
+```{r}
+# now actually make the change
+wbMod |>
+  inner_join(wbSelect) |>
+  distinct(path, seg = SegmentOutput, wb, write.files = Flag,
+      elvVolCrvFl, RESSIMCode = ReachName) |>
+  mutate(Result = pmap(
+    list(path = path, seg = seg, wb = wb, write.files = write.files,
+      elvVolCrvFl = elvVolCrvFl, RESSIMCode = RESSIMCode),
+    function(...)
+      readW2ConInOut(..., wd = wd)$watbal$fit
+  ))
+```
+
+```{r}
+# run the model
+runs = wbSummary |>
+  inner_join(wbSelect) |>
+  # sort by run order
+  arrange(W2name) |>
+  distinct(path) |>
+  mutate(process = map(path, function(x) {
+    Sys.sleep(2)
+    process$new("w2_4p2_gen64opt1_usgs7.exe", wd = x,
+      supervise = TRUE, stdout = "|", stderr = "|")
+  }))
+
+# check running
+map_lgl(runs$process, function(x) x$is_alive())
+
+#runs$process[[1]]$read_output_lines() #fail
+#runs$process[[2]]$read_output_lines() # fail
+#runs$process[[3]]$read_output_lines() #fail
+#runs$process[[4]]$read_output_lines() # fail
+#runs$process[[5]]$read_output_lines() # fail
+#
+#runs$process[[1]]$get_exit_status() #fail
+#runs$process[[2]]$get_exit_status() # fail
+#runs$process[[3]]$get_exit_status() #fail
+#runs$process[[4]]$get_exit_status() # fail
+#runs$process[[5]]$get_exit_status()
+
+
+
+```
+
+
+```{r}
+# reset QDT
+reruns = wbMod |>
+  inner_join(wbSelect) |>
+  mutate(Modified = pmap(
+    list(path = path, qdt = "OFF", seg = SegmentOutput, wb = wb, Flag = Flag),
+    function(..., Flag) {
+      if (Flag) {
+        modifyW2con(...)
+        TRUE
+      } else {
+        FALSE
+      }
+    }
+  )) |>
+  arrange(W2name) |>
+  pull(path) |>
+  unique() |>
+  # name processes
+  set_names(basename) |>
+  map(function(x) {
+    Sys.sleep(2)
+    process$new("w2_4p2_gen64opt1_usgs7.exe", wd = x,
+      supervise = TRUE, stdout = "|", stderr = "|")
+  })
+
+
+# and turn QDT back on
+wbMod |>
+  inner_join(wbSelect) |>
+  mutate(Modified = pmap(
+    list(path = path, qdt = "ON", seg = SegmentOutput, wb = wb, Flag = Flag),
+    function(..., Flag) {
+      if (Flag) {
+        modifyW2con(...)
+        TRUE
+      } else {
+        FALSE
+      }
+    }
+  ))
 ```
