@@ -1,0 +1,10 @@
+RESSIMCode,ReachName,W2name,SegmentOutput,wb,DownstreamModel,MeasTFileNm
+DET,DETROIT,det,34,1,NA,
+BCL,BIGCLIFF,bcl,16,1,NA,
+GPR,GREENPETER,gpfos,17,1,NA,
+FOS,FOSTER,gpfos,80,2,NA,
+CGR,COUGAR,cgr,29,1,NA,
+HCR,HILLSCREEK,hcr,25,1,NA,
+MFR,MiddleFork,mfr,85,1,NA,
+LOP,LOOKOUTPOINT,lopdex,36,1,NA,
+DEX,DEXTER,lopdex,57,2,NA,

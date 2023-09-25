@@ -1,0 +1,268 @@
+---
+output: html_document
+---
+-----
+title: "Compare Willamette Hydropower Disposition Scenarios"
+author: Norman Buccola (norman.buccola@usace.army.mil)
+output: html_document
+----
+
+=====
+
+
+Purpose/Background
+------------
+
+Steps for analyzing scenarios:
+
+1) Post-process RES-SIM output for W2 inputs: Extract 2011, 2015, and 2016 generating gate outflow files (QGT), water surfaces for each project.
+
+2) Post-process RES-SIM output for TDG calculations: Use entire period of record and prepare gate outflow data for TDG python script. 
+
+3) Run TDG python scripts, then post-process here and generate charts, tables.
+
+4) Run W2 water balances using another R script
+
+5) Post-process W2 output here and generate charts, tables.
+
+
+```{r global_options, include=FALSE,results="hide"} 
+library(knitr)
+knitr::opts_chunk$set(fig.width=8, fig.height=4, fig.path='Figs/',
+                      #root.dir='/media/removable/Elements/ColumbiaEIS/',
+                      #root.dir='F:/ColumbiaEIS/',
+                      include=T,echo=F, warning=FALSE, message=FALSE)
+```
+
+
+```{r GetInOutKey, echo=F}
+# Norman Buccola, USACE, 2023-07-19
+#install.packages(c('reshape2','foreach','lubridate','ggplot2','plyr','RColorBrewer','scales','hydroTSM'))
+
+rm(list=ls())
+
+# Load previous w2 model results
+#load(file.path(dataDir,"analysis/NAA_Alt1_Alt2a_Alt2b_Alt3a_Alt3b_Alt4_Alt5","WVEIS_WQCompareNAAtoAlt5_2022-08-10.RData"))
+wd<-'C:/Users/g2echnb9/Documents'
+funcDir<-file.path(wd,'WillametteDisposition2023/RES-SIM')
+dataDir<-file.path(wd,'WillametteDisposition2023/RES-SIM') # Where to get RES-SIM data
+RefDataDir<-file.path(wd,'WillametteDisposition2023/RefData') # 
+writeDir<-file.path(wd,'WillametteDisposition2023/analysis')
+
+# source(file.path(funcDir,'makeW2.input.file.r'))
+# source(file.path(funcDir,'temp.est.funcs.r'))
+# source(file.path(funcDir,'get.w2.inflows.r'))
+# source(file.path(funcDir,'moving.avg.r'))
+# source(file.path(funcDir,'read.interp.davg.r'))
+source(file.path(funcDir,'WVEIS_w2ConQIN_rows.r'))
+# Load Colors
+source(file.path(funcDir,'colorPal.R')) # Need to replace 'eis.pal' with 'MyPal'
+library(reshape2)
+library(foreach)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(scales)
+library(hydroTSM)
+library(readxl)
+#library(plotly)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(purrr)
+#devtools::install_github("nbuccola/w2r",force=T)
+library(w2r)
+
+#library(dssrip)
+cfs2cms<- 1/35.31466688252347 
+ft2m<-1/3.28084
+c2f <-function(x){x*(9/5)+32} # convert to F
+f2c <-function(x){(x-32)*(5/9)} # convert to C
+mnthdys<-c("03-15","04-01","04-15","05-01","05-15","06-01","06-15","07-01","07-15","08-01","08-15","09-01")
+
+mnthdysAll<-c("01-01","01-15","02-01","02-15","03-01",mnthdys,"09-15","10-01","10-15","11-01","11-15","12-01","12-15")
+spawndays <- c(244,263,274)
+Sts3ltr <- c("HCR","LOP","DEX","CGR","GPR","FOS" ,"DET","BCL") #,"ALB","SLM"
+StsCWMS <- c("HCRO","DEXO","CGRO","GPRO","SSFO","BCLO")
+StsCWMSall <- c(StsCWMS,"ALBO", "SLMO")
+Sts2Smrz<-paste(StsCWMSall,collapse = '|') 
+#Sts2SmrzLow <- "JASO|VIDO|NSJO|JFFO|HARO|ALBO|SLMO"
+Sts2SmrzLow <- "ALBO|SLMO"
+
+#Sts2Smrz<-paste(c('Niagara','Foster','Rainbow','Dexter','Albany','Keizer'),collapse = '|') 
+    
+#summarize to bi-monthly increments
+p <- c(0.05, 0.5, 0.95)
+p_names <- map_chr(p, ~paste0(.x*100, "%"))
+p_funs <- map(p, ~partial(function(x){round(quantile(x, probs = .x, na.rm = TRUE),1)})) %>% 
+  set_names(nm = p_names)
+p_funs[['nDaysAbv110']] <- function(x){length(which(x>110))}
+statLabs <- c(paste0("TDG ",names(p_funs)[c(1:3)]),"nDaysAbv110")
+names(statLabs) <- names(p_funs)
+w2dir <- file.path(wd,'WillametteDisposition2023') #,'WQ')
+w2TtargDir <- file.path(RefDataDir,'W2TempTargets_2021-01-19')
+WSELVobsDir <- file.path(RefDataDir,'WVP_WSELV_2011-2016')
+tobsDir <- file.path(RefDataDir,'measured')
+#Sts<-c("HCRO","DEXO","CGRO","SSFO" ,"BCLO") #"GPRO",
+source(file.path(funcDir,'WVWQfunctions.r'))
+# Read in proposed temp targets for action alternatives (AA)
+tts <- ReadW2Targs(w2TtargDir)
+# Read in ODEQ TMDL temp targets
+TMDLtargdir <- file.path(RefDataDir,'TMDL_TempTargs')
+# Should be 13, 16, and 18 deg C
+ttTMDL <- ReadTMDLTargs(TMDLtargdir)
+
+ORStnd <- ReadOrStStnds(TMDLtargdir = gsub('TMDL_TempTargs','DEQ_ORStStndrds',TMDLtargdir))
+
+# Read in RA targets as of 2023-02-02 (many from 2008 BiOP)
+RATargsdir <- file.path(RefDataDir,'WilTempTargsCWMS.csv')
+ttRA <- ReadRATargs(RATargsdir)
+ttAll <- bind_rows(tts,ttTMDL,ttRA,ORStnd) %>%
+  mutate(ttType = as.factor(ttType),
+         Location = factor(Location,ordered=T,
+                           levels = Sts3ltr)) #'GPR',
+rm(tts,ttTMDL,ttRA,ORStnd)
+
+# Define names  of DSS files
+altDirs<-list(Measured = list(w2dir = NA),
+              Baseline = list(
+                fld = file.path(dataDir,'Baseline'),
+                dss = 'DISP23_MGO0_14Sep2023_220326.dss',
+                partF=c('DISP23_MGO0'),
+                w2dir = file.path(w2dir,'Baseline')),
+              StnSrvc = list(
+                fld = file.path(dataDir,'StationService'),
+                dss = 'STA_SERV--0_15Sep2023_083002.dss',
+                partF=c('STA_SERV--0'),
+                w2dir = file.path(w2dir,'ChangeThis')),
+              DcmPenstock = list(
+                fld = file.path(dataDir,'NoPenstock'),
+                dss = 'NO_PP_MGO-0_15Sep2023_083002.dss',
+                partF=c('NO_PP_MGO-0'),
+                w2dir = file.path(w2dir,'DcmPenstock'))
+              )
+altDirs[['Measured']] <- NULL
+# altDirs[['Baseline']] <- NULL
+# altDirs[['DcmPenstock']] <- NULL
+# altDirs[['StnSrvc']] <- NULL
+
+# Define names of DSS files
+#ExcCrit <- read_xlsx(file.path(dataDir,'analysis/TempEvaluationCriteriaKoch2020.xlsx'),sheet = 1)
+
+usace_gagenms <- read_xlsx(file.path(RefDataDir,'WVEISGages.xlsx')) %>%
+  mutate(Gage = as.character(Gage)) %>%
+  distinct()
+ 
+EIS_outputlocs <- read_csv(file.path(RefDataDir,'EIS_outputlocs.csv')) %>% 
+  filter(Temp) %>%
+  inner_join(usace_gagenms %>% select(Gage,USACE_ID), by = 'Gage') %>%
+  select(c(Model,River,Gage,`Gage Name`,`Will_RM-midpt`,'USACE_ID')) %>%
+  distinct()
+rm(usace_gagenms)
+
+
+source(file.path(funcDir,'makeQGT4WillW2_2022-12-12.r'))
+compDir <- file.path(writeDir,paste0(names(altDirs),collapse = '_'))
+dir.create(compDir)
+
+source(file.path(dataDir,'QGT_elvsFrom_w2_con_2021-11-01.r'))
+# Define names of DSS files
+
+altDirs <- lapply(altDirs,function(x){
+  x[['RoptFlNm']] <- paste0(gsub('.dss','',x[['dss']]),'_TDGnpts.Rdata')
+  x[['RTDGoptFlNm']] <- file.path('TDG_Analysis','BasePrcOutage',gsub('TDGnpts','TDGotpts4AltCmp',x[['RoptFlNm']]))
+  x[['RW2nptsFlNm']] <- paste0(gsub('.dss','',x[['dss']]),'_W2inputs.Rdata')
+ return(x)}
+  ) 
+
+library("scales")
+library('ggsci')
+
+# ImpactPal <- show_col(pal_futurama("planetexpress", alpha = 0.6)(12))
+
+ImpactPal <- c(`Major Adv`="#6C4C40FF",`Moderate Adv` = "#8C6D63FF", #Browns
+               `Minor Adv`="#BBAAA4FF",
+               `Negligible` = "#3F404199", 
+               `Minor Ben` =  "#BADEFAFF",# Blues
+               `Moderate Ben`="#64B4F6FF",`Major Ben`="#2096F2FF" ) 
+
+```
+
+```{r CompareOpsInW2Years, echo=F}
+source(file.path(funcDir,'WVWQfunctions.r'))
+#Read summary of Ops data in W2 model years
+w2npts <- foreach(alt= 1:length(altDirs),.combine='rbind') %do%{
+  if(names(altDirs)[alt] != "Measured"){
+    w2i_alt <- LoadAltW2npts(file.path(altDirs[[alt]][['fld']],
+                                       altDirs[[alt]][['RW2nptsFlNm']])) 
+    w2i_alt$Alt <- names(altDirs)[alt]
+    return(w2i_alt)
+  }
+}
+
+if(any(grepl('Meas',names(altDirs)))){
+  WSELVmeas <- ReadMeasWSELVs()
+}
+
+RuleCurveDir <- file.path(RefDataDir,'rule_curves')
+rcs <- ReadRuleCurves(RuleCurveDir) %>% 
+  expand_grid(Year = c('2011','2015', '2016'),
+                     Alt = names(altDirs)) %>%
+  mutate(Year = factor(Year,levels = levels(w2npts$Year)),
+         Site = factor(Site,levels = levels(w2npts$Site),ordered=T)) 
+
+w2npts <- w2npts %>% bind_rows(rcs) %>%
+  mutate(Param = as.factor(Param))
+
+# Plot Comparison of Alts
+CompareAltW2npts()
+  
+  
+```
+
+
+```{r GetTDGdata, echo=F}
+#Read summary of Ops and TDG data
+#source(file.path(dataDir,'WVEIS_functions_2021-10-04.r'))
+#source('C:/Users/g2echnb9/Documents/WillametteEIS/RES-OPS/WVEIS_functions_2021-10-04.r')
+source(file.path(dataDir,'WVWQfunctions.r'))
+
+tdgOpsSum <- ReadAltTDG('TDGsum')
+tdgExcYr <- ReadAltTDG(var = 'TDGsumExcByYr')
+tdgExcMD <- ReadAltTDG('TDGsumExcByMD')
+tdgAll <- ReadAltTDG('tdg4altcmp')
+# Generate comparison plots of TDG
+
+CompareAltTDG()
+```
+
+Get W2 file output. Load RData file for an example.
+
+```{r GetW2Temp, echo=F, message = FALSE}
+#Read summary of Ops and TDG data
+source(file.path(dataDir,'WVWQfunctions.r'))
+#source('C:/Users/g2echnb9/Documents/WillametteEIS/RES-OPS/WVEIS_functions_2023-02-04.r')
+Tmeas <- ReadMeasTemps()
+#source(file.path(dataDir,'get.w2.inflows.r'))
+
+# If you can't get the following line of code to run, try just loading the example in the RDATA file.
+ReadAltW2Res(fldrs = na.omit(sapply(altDirs,function(x){x[['w2dir']]})))
+CalcTTdifs()
+
+for(tt in c('RA','W2','TMDL','ORStnd')){
+  # Plot time-series difference from target
+  PlotW2TempByYear(ttType = tt)
+  MakeTimpacts(ttType = tt)
+  #save.image(file = file.path(dataDir,"WVEIS_Rscripts4WQpostprocessing/WVEIS_WQCompareNAAtoAlt5_2022-08-10.RData"))
+  #load(file.path(dataDir,"WVEIS_Rscripts4WQpostprocessing",'WVEIS_WQCompareNAAwMeasurements_2022-03-16.Rdata'))
+
+  #TtDifYr %>% filter(LifeStage == 'MarMay',Location == 'GPRO',Year == '2015')
+  #TtargDifLoc %>% filter(Location == 'CGR',Year == '2015',Alt =='Alt2b',TargNm =='ORStnd')
+  # This will plot the various summary graphs and tables of the W2 modeling
+  #if(grepl('W2|ORStnd',tt)){
+    ComparePlotAltW2(ttType = tt)
+  #}
+}
+
+```
