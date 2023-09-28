@@ -96,6 +96,7 @@ while(nrow(wbSelect)>0){
   }
   # Clean up
   rm(wbSummary,wbSelect,modStatus,runs)  
+  #Sys.sleep(60)
   # 
   # tail(runs$process[[1]]$read_output_lines()) #fail
   # tail(runs$process[[2]]$read_output_lines()) # fail
@@ -111,23 +112,23 @@ while(nrow(wbSelect)>0){
   #runs$process[[5]]$get_exit_status()
   wbSummary <- watBalIter()
   
-  # plt <- ggplot(wbSummary |> filter(
-  #   #Flag
-  # ) ) +
-  #   aes(x = Year, y = MAE, fill = Flag) +
-  #   geom_hline(yintercept= 0.2, color = "red") +
-  #   geom_point(size = 5, shape = 21) +
-  #   ggtitle('Water Balance') +
-  #   facet_grid(c("W2name", "Scenario")) +
-  #   scale_x_discrete(NULL) +
-  #   scale_y_log10() +
-  #   scale_fill_manual("Modification Allowed", values = c("TRUE" = "lightblue", "FALSE" = "grey70")) +
-  #   theme_bw(18) +
-  #   theme(legend.position = "bottom")
-  # 
+  plt <- ggplot(wbSummary |> filter(
+    #Flag
+  ) ) +
+    aes(x = Year, y = MAE, fill = Flag) +
+    geom_hline(yintercept= 0.5, color = "red") +
+    geom_point(size = 5, shape = 21) +
+    ggtitle('Water Balance') +
+    facet_grid(c("W2name", "Scenario")) +
+    scale_x_discrete(NULL) +
+    scale_y_log10() +
+    scale_fill_manual("Modification Allowed", values = c("TRUE" = "lightblue", "FALSE" = "grey70")) +
+    theme_bw(18) +
+    theme(legend.position = "bottom")
+
   # ggsave(plt, file.path(wd, projFldr, verDir, "WaterBalanceSummary.png"),
   #        width = 9,height = 6)
-  # 
+
   
   # run headwaters first
   wbSelect = wbSummary |>
@@ -136,7 +137,7 @@ while(nrow(wbSelect)>0){
       MAE > 0.5,
       Flag
     ) |>
-    select(RESSIMCode, Scenario, Year,wb) #,MAE
+    select(RESSIMCode, Scenario, Year,wb,MAE)
 
 } # End while loop
 
