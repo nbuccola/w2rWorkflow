@@ -112,22 +112,24 @@ while(nrow(wbSelect)>0){
   #runs$process[[5]]$get_exit_status()
   wbSummary <- watBalIter()
   
-  plt <- ggplot(wbSummary |> filter(
-    #Flag
-  ) ) +
-    aes(x = Year, y = MAE, fill = Flag) +
-    geom_hline(yintercept= 0.5, color = "red") +
-    geom_point(size = 5, shape = 21) +
-    ggtitle('Water Balance') +
-    facet_grid(c("W2name", "Scenario")) +
+  plt <- ggplot(wbSummary |>
+                  rename(Site = RESSIMCode) |>
+                  mutate(Scenario = gsub('StnService','Scenario1',gsub('DcmPenstock','Scenario2',Scenario)))) +
+    aes(x = Year, y = MAE, fill = Scenario) +
+    #geom_hline(yintercept= 0.5, color = "red") +
+    geom_point(size = 5, shape = 21,alpha = 0.7) +
+    ggtitle('Water Balance Fit Statistics') +
+    facet_grid(c("Site")) +
     scale_x_discrete(NULL) +
-    scale_y_log10() +
-    scale_fill_manual("Modification Allowed", values = c("TRUE" = "lightblue", "FALSE" = "grey70")) +
-    theme_bw(18) +
+    ylab('Mean Absolute Error (m)') +
+    #scale_y_log10() +
+    #scale_fill_manual("Modification Allowed", values = c("TRUE" = "lightblue", "FALSE" = "grey70")) +
+    theme_bw(14) +
     theme(legend.position = "bottom")
+  plt
 
-  # ggsave(plt, file.path(wd, projFldr, verDir, "WaterBalanceSummary.png"),
-  #        width = 9,height = 6)
+  ggsave(plt, filename = file.path(DataDir, "WaterBalanceSummary.png"),
+         width = 9,height = 6)
 
   
   # run headwaters first
